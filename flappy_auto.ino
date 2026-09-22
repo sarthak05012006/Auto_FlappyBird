@@ -29,6 +29,68 @@
 
 #define SERVO_PIN 13
 
+Servo flapServo;
+
+// Servo angles
+#define SERVO_IDLE   0
+#define SERVO_PRESS  55
+
+// ===============================
+// Camera resolution
+// ===============================
+
+#define FRAME_WIDTH  320
+#define FRAME_HEIGHT 240
+
+// ===============================
+// Bird detection
+// ===============================
+
+int birdX = -1;
+int birdY = -1;
+
+// ===============================
+// Pipe detection
+// ===============================
+
+int pipeX = -1;
+int gapTop = -1;
+int gapBottom = -1;
+
+// ===============================
+// Timing
+// ===============================
+
+unsigned long lastFlap = 0;
+
+// Minimum time between flaps
+const unsigned long FLAP_DELAY = 180;
+
+// ======================================================
+// RGB565 conversion
+// ======================================================
+
+void rgb565ToRGB(uint16_t pixel, int &r, int &g, int &b)
+{
+  r = ((pixel >> 11) & 0x1F) << 3;
+  g = ((pixel >> 5) & 0x3F) << 2;
+  b = (pixel & 0x1F) << 3;
+}
+
+
+// ======================================================
+// Detect green pipe
+// ======================================================
+
+bool isPipe(int r, int g, int b)
+{
+  return (
+    g > 90 &&
+    g > r * 1.25 &&
+    g > b * 1.15
+  );
+}
+
 void setup() {
   // put your setup code here, to run once:
 
