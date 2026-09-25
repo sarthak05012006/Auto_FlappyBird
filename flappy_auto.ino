@@ -1,10 +1,8 @@
 #include "esp_camera.h"
 #include <ESP32Servo.h>
 
-// ===============================
-// AI Thinker ESP32-CAM pins
-// ===============================
-
+// ================= CAMERA PINS =================
+// AI-Thinker ESP32-CAM
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
@@ -19,305 +17,44 @@
 #define Y4_GPIO_NUM       19
 #define Y3_GPIO_NUM       18
 #define Y2_GPIO_NUM        5
+
 #define VSYNC_GPIO_NUM    25
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
-// ===============================
-// Servo
-// ===============================
-
+// ================= SERVO =================
 #define SERVO_PIN 13
 
-Servo flapServo;
+Servo keyServo;
 
-// Servo angles
-#define SERVO_IDLE   0
-#define SERVO_PRESS  55
+// Servo positions
+#define SERVO_RELEASE  70
+#define SERVO_PRESS    115
 
-// ===============================
-// Camera resolution
-// ===============================
+// ================= GAME SETTINGS =================
 
-#define FRAME_WIDTH  320
-#define FRAME_HEIGHT 240
+// Approximate location of bird in camera frame
+#define BIRD_X 45
 
-// ===============================
-// Bird detection
-// ===============================
+// Vertical position considered dangerous
+#define SAFE_TOP     35
+#define SAFE_BOTTOM  100
 
-int birdX = -1;
-int birdY = -1;
+// How often camera is checked
+#define DETECTION_DELAY 80
 
-// ===============================
-// Pipe detection
-// ===============================
-
-int pipeX = -1;
-int gapTop = -1;
-int gapBottom = -1;
-
-// ===============================
-// Timing
-// ===============================
+// Minimum time between key presses
+#define FLAP_COOLDOWN 250
 
 unsigned long lastFlap = 0;
 
-// Minimum time between flaps
-const unsigned long FLAP_DELAY = 180;
 
+// =================================================
+// CAMERA SETUP
+// =================================================
 
-// ======================================================
-// RGB565 conversion
-// ======================================================
+void setupCamera() {
 
-void rgb565ToRGB(uint16_t pixel, int &r, int &g, int &b)
-{
-  r = ((pixel >> 11) & 0x1F) << 3;
-  g = ((pixel >> 5) & 0x3F) << 2;
-  b = (pixel & 0x1F) << 3;
-}
-
-
-// ======================================================
-// Detect green pipe
-// ======================================================
-
-bool isPipe(int r, int g, int b)
-{
-  return (
-    g > 90 &&
-    g > r * 1.25 &&
-    g > b * 1.15
-  );
-}
-
-
-// ======================================================
-// Detect bird
-// Yellow/orange bird
-// ======================================================
-
-bool isBird(int r, int g, int b)
-{
-  return (
-    r > 120 &&
-    g > 80 &&
-    b < 100 &&
-    r > b * 1.4
-  );
-}
-
-
-// ======================================================
-// Detect bird position
-// ======================================================
-
-void detectBird(camera_fb_t *fb)
-{
-  long sumX = 0;
-  long sumY = 0;
-  int count = 0;
-
-  uint16_t *buffer = (uint16_t *)fb->buf;
-
-  // Ignore edges
-  for (int y = 20; y < FRAME_HEIGHT - 20; y += 2)
-  {
-    for (int x = 10; x < FRAME_WIDTH - 10; x += 2)
-    {
-      uint16_t pixel = buffer[y * FRAME_WIDTH + x];
-
-      int r, g, b;
-      rgb565ToRGB(pixel, r, g, b);
-
-      if (isBird(r, g, b))
-      {
-        sumX += x;
-        sumY += y;
-        count++;
-      }
-    }
-  }
-
-  if (count > 5)
-  {
-    birdX = sumX / count;
-    birdY = sumY / count;
-  }
-  else
-  {
-    birdX = -1;
-    birdY = -1;
-  }
-}
-
-
-// ======================================================
-// Detect nearest green pipe
-// ======================================================
-
-void detectPipe(camera_fb_t *fb)
-{
-  uint16_t *buffer = (uint16_t *)fb->buf;
-
-  pipeX = -1;
-  gapTop = -1;
-  gapBottom = -1;
-
-  // Start searching just ahead of bird
-  int searchStart = 80;
-
-  if (birdX > 0)
-    searchStart = birdX + 30;
-
-  if (searchStart >= FRAME_WIDTH)
-    return;
-
-  // Search for first strong vertical green pipe
-  for (int x = searchStart; x < FRAME_WIDTH - 10; x += 3)
-  {
-    int greenCount = 0;
-
-    for (int y = 0; y < FRAME_HEIGHT; y += 3)
-    {
-      uint16_t pixel = buffer[y * FRAME_WIDTH + x];
-
-      int r, g, b;
-      rgb565ToRGB(pixel, r, g, b);
-
-      if (isPipe(r, g, b))
-        greenCount++;
-    }
-
-    // Enough green pixels = pipe
-    if (greenCount > 15)
-    {
-      pipeX = x;
-      break;
-    }
-  }
-
-  if (pipeX == -1)
-    return;
-
-
-  // Find the gap
-  bool insideGap = false;
-
-  for (int y = 0; y < FRAME_HEIGHT; y += 2)
-  {
-    uint16_t pixel = buffer[y * FRAME_WIDTH + pipeX];
-
-    int r, g, b;
-    rgb565ToRGB(pixel, r, g, b);
-
-    bool green = isPipe(r, g, b);
-
-    if (!green && !insideGap)
-    {
-      gapTop = y;
-      insideGap = true;
-    }
-
-    if (green && insideGap)
-    {
-      gapBottom = y;
-      break;
-    }
-  }
-
-  // If gap continues to bottom
-  if (insideGap && gapBottom == -1)
-    gapBottom = FRAME_HEIGHT - 1;
-}
-
-
-// ======================================================
-// Flap servo
-// ======================================================
-
-void flap()
-{
-  unsigned long now = millis();
-
-  if (now - lastFlap < FLAP_DELAY)
-    return;
-
-  Serial.println(">>> FLAP!");
-
-  flapServo.write(SERVO_PRESS);
-
-  delay(70);
-
-  flapServo.write(SERVO_IDLE);
-
-  lastFlap = millis();
-}
-
-
-// ======================================================
-// Game decision
-// ======================================================
-
-void makeDecision()
-{
-  if (birdY < 0)
-  {
-    Serial.println("Bird not detected");
-    return;
-  }
-
-  if (gapTop < 0 || gapBottom < 0)
-  {
-    Serial.println("Pipe not detected");
-
-    // Safety: if bird gets too low
-    if (birdY > 175)
-      flap();
-
-    return;
-  }
-
-  int gapCenter = (gapTop + gapBottom) / 2;
-
-  Serial.print("Bird Y: ");
-  Serial.print(birdY);
-
-  Serial.print(" | Pipe X: ");
-  Serial.print(pipeX);
-
-  Serial.print(" | Gap Center: ");
-  Serial.println(gapCenter);
-
-
-  // ==================================================
-  // Automatic control
-  // ==================================================
-
-  int error = birdY - gapCenter;
-
-
-  // Bird is below safe center
-  if (error > 20)
-  {
-    flap();
-  }
-
-  // Bird is very low
-  if (birdY > 195)
-  {
-    flap();
-  }
-}
-
-
-// ======================================================
-// Camera setup
-// ======================================================
-
-void setupCamera()
-{
   camera_config_t config;
 
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -345,79 +82,272 @@ void setupCamera()
 
   config.xclk_freq_hz = 20000000;
 
-  config.pixel_format = PIXFORMAT_RGB565;
+  config.pixel_format = PIXFORMAT_GRAYSCALE;
 
-  // Low resolution for faster processing
-  config.frame_size = FRAMESIZE_QVGA;
+  // Small image = faster processing
+  config.frame_size = FRAMESIZE_QQVGA;
 
   config.jpeg_quality = 12;
   config.fb_count = 1;
 
   esp_err_t err = esp_camera_init(&config);
 
-  if (err != ESP_OK)
-  {
-    Serial.print("Camera initialization failed: ");
-    Serial.println(err);
-    while (true);
+  if (err != ESP_OK) {
+    Serial.print("Camera initialization failed: 0x");
+    Serial.println(err, HEX);
+
+    while (true) {
+      delay(1000);
+    }
   }
 
   Serial.println("Camera initialized!");
 }
 
 
-// ======================================================
-// SETUP
-// ======================================================
+// =================================================
+// SERVO FLAP
+// =================================================
 
-void setup()
-{
+void flap() {
+
+  unsigned long now = millis();
+
+  if (now - lastFlap < FLAP_COOLDOWN) {
+    return;
+  }
+
+  lastFlap = now;
+
+  Serial.println("FLAP!");
+
+  // Press keyboard key
+  keyServo.write(SERVO_PRESS);
+
+  delay(100);
+
+  // Release key
+  keyServo.write(SERVO_RELEASE);
+
+  delay(50);
+}
+
+
+// =================================================
+// SIMPLE IMAGE ANALYSIS
+// =================================================
+//
+// This is a basic vision algorithm.
+// It looks for darker pixels around the
+// expected bird location.
+//
+// It is intended as a starting point and
+// requires calibration for your particular
+// Flappy Bird screen.
+//
+
+int detectBirdY(camera_fb_t *fb) {
+
+  int bestY = -1;
+  int bestScore = 0;
+
+  // Search area around bird
+  int startX = 20;
+  int endX = 70;
+
+  int startY = 10;
+  int endY = 115;
+
+  for (int y = startY; y < endY; y += 3) {
+
+    int score = 0;
+
+    for (int x = startX; x < endX; x += 3) {
+
+      int index = y * fb->width + x;
+
+      if (index >= fb->len) {
+        continue;
+      }
+
+      uint8_t pixel = fb->buf[index];
+
+      // Detect dark object
+      if (pixel < 80) {
+        score++;
+      }
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestY = y;
+    }
+  }
+
+  return bestY;
+}
+
+
+// =================================================
+// SIMPLE PIPE DETECTION
+// =================================================
+
+int detectObstacleY(camera_fb_t *fb) {
+
+  int obstacleY = -1;
+
+  int strongest = 0;
+
+  // Look in front of bird
+  int startX = 80;
+  int endX = 140;
+
+  for (int y = 10; y < 115; y += 3) {
+
+    int score = 0;
+
+    for (int x = startX; x < endX; x += 3) {
+
+      int index = y * fb->width + x;
+
+      if (index >= fb->len) {
+        continue;
+      }
+
+      uint8_t pixel = fb->buf[index];
+
+      // Dark obstacle
+      if (pixel < 80) {
+        score++;
+      }
+    }
+
+    if (score > strongest) {
+      strongest = score;
+      obstacleY = y;
+    }
+  }
+
+  return obstacleY;
+}
+
+
+// =================================================
+// SETUP
+// =================================================
+
+void setup() {
+
   Serial.begin(115200);
+
+  delay(1000);
 
   Serial.println();
   Serial.println("==============================");
-  Serial.println("AUTO FLAPPY BIRD");
+  Serial.println("AUTOMATIC FLAPPY BIRD PLAYER");
   Serial.println("==============================");
 
   // Servo
-  flapServo.setPeriodHertz(50);
-  flapServo.attach(SERVO_PIN, 500, 2400);
+  keyServo.setPeriodHertz(50);
 
-  flapServo.write(SERVO_IDLE);
+  keyServo.attach(
+    SERVO_PIN,
+    500,
+    2400
+  );
+
+  // Start in released position
+  keyServo.write(SERVO_RELEASE);
+
+  delay(500);
 
   // Camera
   setupCamera();
 
-  Serial.println("System Ready!");
+  Serial.println("System ready!");
+  Serial.println("Starting in 3 seconds...");
+
+  delay(3000);
+
+  Serial.println("GAME START!");
 }
 
 
-// ======================================================
-// LOOP
-// ======================================================
+// =================================================
+// MAIN LOOP
+// =================================================
 
-void loop()
-{
+void loop() {
+
+  // Capture image
   camera_fb_t *fb = esp_camera_fb_get();
 
-  if (!fb)
-  {
+  if (!fb) {
+
     Serial.println("Camera capture failed");
+
+    delay(100);
+
     return;
   }
 
+
   // Detect bird
-  detectBird(fb);
+  int birdY = detectBirdY(fb);
 
-  // Detect pipe and safe gap
-  detectPipe(fb);
+  // Detect obstacle
+  int obstacleY = detectObstacleY(fb);
 
-  // Make automatic decision
-  makeDecision();
 
   // Return frame buffer
   esp_camera_fb_return(fb);
 
-  // Small delay
-  delay(30);
+
+  // Debug information
+  Serial.print("Bird Y = ");
+  Serial.print(birdY);
+
+  Serial.print(" | Obstacle Y = ");
+  Serial.println(obstacleY);
+
+
+  // =============================================
+  // FLIGHT CONTROL
+  // =============================================
+
+  if (birdY != -1) {
+
+    // Bird too low
+    if (birdY > SAFE_BOTTOM) {
+
+      Serial.println("Bird LOW -> FLAP");
+
+      flap();
+    }
+
+    // Bird too high
+    else if (birdY < SAFE_TOP) {
+
+      Serial.println("Bird HIGH -> NO FLAP");
+    }
+
+    // Bird in middle
+    else {
+
+      // If obstacle detected near bird,
+      // flap to move upward
+      if (obstacleY != -1) {
+
+        if (obstacleY > birdY + 15) {
+
+          Serial.println("Obstacle LOW -> FLAP");
+
+          flap();
+        }
+      }
+    }
+  }
+
+
+  delay(DETECTION_DELAY);
 }
